@@ -1,0 +1,83 @@
+---
+title: "Talk title"
+subtitle: ""
+format:
+  clean-revealjs:
+    self-contained: false
+    slide-number: true
+    preview-links: auto
+    logo: figs/hsph.png
+    footer: "Conference or seminar"
+    smaller: false
+    incremental: false
+    fig-width: 6
+    fig-asp: 0.618
+author:
+  - name: Nima Hejazi
+    orcid: 0000-0002-7127-2789
+    email: nhejazi@hsph.harvard.edu
+    affiliations: Harvard Biostatistics
+date: last-modified
+bibliography: refs.bib
+csl: https://www.zotero.org/styles/journal-of-the-royal-statistical-society
+---
+
+## Case study
+
+- to-do
+- to-do
+
+## Data and causal target parameter
+
+::: {style="font-size: 90%;"}
+- Data: $n$ study units, with data on each as $O_i = (L_i, A_i, Y_i)$, where
+  - $L$ are covariates and comorbidities measured at baseline
+  - $A$ is
+  - $Y$ is
+
+- Parameter: Average treatment effect (ATE),
+  $\theta^{\text{MTP}} = \E[Y^{A_{\delta}} - Y]$
+  - $Y^{A_{\delta}}$: potential outcome for
+:::
+
+## Another slide
+
+## Yet another slide
+
+## Give the people...slides
+
+## More slides
+
+## So many slides
+
+## Slides for everyone
+
+## Efficient estimators
+
+Using the EIF, we can construct efficient estimators compatible with flexible
+regression (i.e., machine learning) strategies for nuisance estimation.
+
+. . .
+
+::: {style="font-size: 80%;"}
+[**Both estimators allow *arbitrary machine learning* when fitting nuisance
+functions and are *doubly robust* (i.e., consistent even when only a subset of
+nuisances are well-estimated).**]{.bg style="--col: #f08080"}
+:::
+
+## Results of numerical experiments
+
+
+## Results of data analysis
+
+
+## Summary
+
+- ...
+- ...
+- ...
+
+## References {footer=false .smaller}
+
+::: {#refs style="font-size: 85%;"}
+:::
