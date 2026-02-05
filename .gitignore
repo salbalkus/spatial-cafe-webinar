@@ -7,3 +7,11 @@ deck_*.pdf
 *_files/
 
 **/*.quarto_ipynb
+.Rproj.user
+.Rhistory
+*.Rproj
+
+data/ca_counties*
+*.rds
+*.zip
+*ca_bg_shapefile*
