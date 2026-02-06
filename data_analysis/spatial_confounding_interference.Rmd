@@ -231,9 +231,16 @@ mu <- 0.25*ca_pm25$pov +
 # Generate disease counts using population (ca_pm25$total_pop) and mu
 ca_pm25$Y <- rpois(nrow(ca_pm25), exp(mu)/500 * ca_pm25$total_pop)
 summary(ca_pm25$Y)
+
+# Run glm poisson
+fit_glm <- glm(Y ~ pm25 + pov + log(density) + pct_hispanic,
+               offset = log(total_pop),
+               family = "poisson",
+               data = ca_pm25)
+summary(fit_glm) # ORACLE: coefficients look good
 ```
 
-## Step 1
+## Step 1: Fit a
 ```{r}
 library(mgcv)
 f_X_hat <- gam(pm25 ~ s(cent_x, # x coordinate of block group centroid
@@ -246,6 +253,40 @@ ca_pm25$smoothed_pm25 <- f_X_hat$fitted.values
 ca_pm25$residuals_pm25 <- f_X_hat$residuals
 summary(f_X_hat)
 ```
+
+## Step 2
+```{r}
+fit_spatial_plus <- mgcv::gam(
+  Y ~ residuals_pm25 + # residuals of PM 2.5 from the previous regression
+    pov + log(density) + # covariates
+    s(cent_x, cent_y, k = 300, fx = T), # another thin plate spline of coordinates
+  family = poisson(link = "log"), # Outcome is disease rate
+  offset = log(total_pop), # offset of population
+  data = ca_pm25,
+  method = "GCV.Cp"
+)
+```
+
+```{r}
+summary(fit_spatial_plus)
+# Save coefficient of residuals_pm25 and confidence interval in a data frame
+results <- data.frame(
+  term = "residuals_pm25",
+  estimate = coef(fit_spatial_plus)["residuals_pm25"],
+  conf_low = confint(fit_spatial_plus)["residuals_pm25", 1],
+  conf_high = confint(fit_spatial_plus)["residuals_pm25", 2]
+)
+```
+
+
+```{r}
+# Compare to ordinary glm
+fit_ols <- glm(Y ~ pm25 + pov + log(density) + pct_hispanic,
+               offset = log(total_pop),
+               family = "poisson",
+               data = ca_pm25)
+```
+
 
 ## Plot PM2.5, the fitted values, and residuals
 ```{r}
