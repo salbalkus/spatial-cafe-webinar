@@ -1,0 +1,418 @@
+---
+title: "Spatial confounding example"
+output: html_document
+---
+
+```{r}
+# Load necessary packages
+library(sf)
+library(mgcv)
+library(gridExtra)
+library(lme4)
+library(stringr)
+library(spdep)
+library(INLA)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(scales)
+```
+
+## Generate synthetic outcome
+```{r}
+ca_pm25 <- read.csv('data/ca_bg_pm25_census_2016.csv')
+set.seed(1234)
+
+beta0 <- 0.05
+beta1 <- 0.25
+beta2 <- 0.1
+beta3 <- 0.5 # 0.5
+beta4 <- -0.2
+
+mu <-  beta0*ca_pm25$pm25 + 
+  beta1*ca_pm25$pov +
+  beta2*log(ca_pm25$density) +
+  beta3*ca_pm25$ndvi +
+  beta4*ca_pm25$D_min_km +
+  rnorm(nrow(ca_pm25),0,0.5)
+
+# Generate disease counts using population (ca_pm25$total_pop) and mu
+ca_pm25$Y <- rpois(nrow(ca_pm25), exp(mu)/10 * ca_pm25$total_pop)
+summary(ca_pm25$Y)
+
+# Run glm poisson
+fit_glm <- glm(Y ~ pm25 + pov + log(density) + ndvi + D_min_km,
+               offset = log(total_pop),
+               family = "poisson",
+               data = ca_pm25)
+summary(fit_glm) # ORACLE: coefficients look good
+results <- data.frame(
+  method = "oracle",
+  estimate = summary(fit_glm)$coefficients["pm25", "Estimate"],
+  conf_low = summary(fit_glm)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_glm)$coefficients["pm25", "Std. Error"],
+  conf_high = summary(fit_glm)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_glm)$coefficients["pm25", "Std. Error"]
+)
+```
+
+## Spatial method 
+```{r}
+fit_spatial <- gam(
+  Y ~ pm25 + # exposure
+    pov + log(density) + # covariates
+    s(cent_x, # x coordinate of block group centroid
+      cent_y, # y coordinate of block group centroid
+      k = 100, # basis dimension
+      fx = T), # apply smoothing
+  family = poisson(link = "log"), # Outcome is disease rate
+  offset = log(total_pop), # offset of population
+  data = ca_pm25,
+  method = "GCV.Cp"
+)
+summary(fit_spatial)$p.coeff["pm25"]
+```
+
+## Save spatial results
+```{r}
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "spatial",
+    estimate = summary(fit_spatial)$p.coeff["pm25"],
+    conf_low = summary(fit_spatial)$p.coeff["pm25"] - 1.96 * summary(fit_spatial)$se["pm25"],
+    conf_high = summary(fit_spatial)$p.coeff["pm25"] + 1.96 * summary(fit_spatial)$se["pm25"]
+  )
+)
+```
+
+## Spatial plus Step 1
+```{r}
+f_X_hat <- gam(pm25 ~ s(cent_x, # x coordinate of block group centroid
+                        cent_y, # y coordinate of block group centroid
+                        k = 100, # basis dimension
+                        fx = T), # apply smoothing
+               data = ca_pm25,
+               method = 'GCV.Cp') # Generalized Cross Validation
+ca_pm25$smoothed_pm25 <- f_X_hat$fitted.values
+ca_pm25$residuals_pm25 <- f_X_hat$residuals
+summary(f_X_hat)
+```
+
+## Spatial plus Step 2
+```{r}
+fit_spatial_plus <- mgcv::gam(
+  Y ~ residuals_pm25 + # residuals of PM 2.5 from the previous regression
+    pov + log(density) + # covariates
+    s(cent_x, cent_y, k = 100, fx = T), # another thin plate spline of coordinates
+  family = poisson(link = "log"), # Outcome is disease rate
+  offset = log(total_pop), # offset of population
+  data = ca_pm25,
+  method = "GCV.Cp"
+)
+```
+
+## Report results
+```{r}
+print(paste("Estimate:", summary(fit_spatial_plus)$p.coeff["residuals_pm25"]))
+```
+
+## Save results
+```{r}
+summary(fit_spatial_plus)
+# Save coefficient of residuals_pm25 and confidence interval in a data frame
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "spatial_plus",
+    estimate = summary(fit_spatial_plus)$p.coeff["residuals_pm25"],
+    conf_low = summary(fit_spatial_plus)$p.coeff["residuals_pm25"] - 1.96 * summary(fit_spatial_plus)$se["residuals_pm25"],
+    conf_high = summary(fit_spatial_plus)$p.coeff["residuals_pm25"] + 1.96 * summary(fit_spatial_plus)$se["residuals_pm25"]
+  )
+)
+```
+
+## Plot PM2.5, the fitted values, and residuals
+```{r}
+ca_bg_shp <- ca_bg_shp %>%
+  left_join(st_drop_geometry(ca_pm25) %>% dplyr::select(GEOID, pm25, smoothed_pm25, residuals_pm25), by = "GEOID")
+g1 <- ggplot() +
+  geom_sf(data = ca_bg_shp, aes(fill = pm25), color = NA, linewidth = NA) +
+  scale_fill_viridis_c(name = "PM2.5 (µg/m³)", na.value = "lightgrey") +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_line(color = "transparent"),
+    legend.background = element_rect(fill = alpha("white", 0.6)),
+    legend.position = "bottom"
+  )
+g2 <- ggplot() +
+  geom_sf(data = ca_bg_shp, aes(fill = smoothed_pm25), color = NA, linewidth = NA) +
+  scale_fill_viridis_c(name = "Smoothed PM2.5 (µg/m³)", na.value = "lightgrey") +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_line(color = "transparent"),
+    legend.background = element_rect(fill = alpha("white", 0.6)),
+    legend.position = "bottom"
+  )
+g3 <- ggplot() +
+  geom_sf(data = ca_bg_shp, aes(fill = residuals_pm25), color = NA, linewidth = NA) +
+  scale_fill_viridis_c(name = "Residuals (µg/m³)", na.value = "lightgrey") +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_line(color = "transparent"),
+    legend.background = element_rect(fill = alpha("white", 0.6)),
+    legend.position = "bottom"
+  )
+png("../figs/ca_bg_pm25_spatialplus.png", width = 12, height = 5, units = "in", res = 300)
+grid.arrange(g1, g2, g3, ncol = 3)
+dev.off()
+```
+
+## Ordinary GLM
+```{r}
+# Compare to ordinary glm
+fit_ols <- glm(Y ~ pm25 + pov + log(density),
+               offset = log(total_pop),
+               family = "poisson",
+               data = ca_pm25)
+summary(fit_ols)
+```
+
+## Save Ordinary GLM results
+```{r}
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "ordinary_glm",
+    estimate = summary(fit_ols)$coefficients["pm25", "Estimate"],
+    conf_low = summary(fit_ols)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_ols)$coefficients["pm25", "Std. Error"],
+    conf_high = summary(fit_ols)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_ols)$coefficients["pm25", "Std. Error"]
+  )
+)
+```
+
+## Plot the results
+```{r}
+# vertical line for true coef (beta0)
+# Order results by Oracle, then Orindary GLM, then spatial, then spatial plus
+results$method <- factor(results$method, levels = c("oracle", "ordinary_glm", "spatial", "spatial_plus"))
+# Rename ordinary_glm as unadjusted
+results$method <- recode(results$method, ordinary_glm = "unadjusted")
+png("../figs/pm25_coefficients_comparison.png", width = 6, height = 4, units = "in", res = 350)
+ggplot(results, aes(x = estimate, y = method)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
+  geom_vline(xintercept = beta0, linetype = "dashed", color = "red") +
+  # add title
+  #ggtitle("Estimated Coefficient for PM2.5") + # center title
+  theme(plot.title = element_text(hjust = 0.5),
+        title = "Estimated Coefficient for PM2.5") +
+  xlab("") +
+  ylab("") +
+  theme_minimal()
+dev.off()
+
+```
+
+## Fit a model with fixed effects at the county level
+```{r}
+# Extract county FIPS code from GEOID (first 5 digits)
+ca_pm25$county_fips <- substr(ca_pm25$GEOID, 1, 5)
+# Convert to factor
+ca_pm25$county_fips <- as.factor(ca_pm25$county_fips)
+fit_fe <- glm(Y ~ pm25 + pov + log(density) + county_fips,
+              offset = log(total_pop),
+              family = "poisson",
+              data = ca_pm25)
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "county_fixed_effects",
+    estimate = summary(fit_fe)$coefficients["pm25", "Estimate"],
+    conf_low = summary(fit_fe)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_fe)$coefficients["pm25", "Std. Error"],
+    conf_high = summary(fit_fe)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_fe)$coefficients["pm25", "Std. Error"]
+  )
+)
+```
+
+## Fit a model with random effects at the county level
+```{r}
+fit_re <- glmer(Y ~ pm25 + pov + log(density) + (1|county_fips),
+                offset = log(total_pop),
+                family = "poisson",
+                data = ca_pm25)
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "county_random_effects",
+    estimate = summary(fit_re)$coefficients["pm25", "Estimate"],
+    conf_low = summary(fit_re)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_re)$coefficients["pm25", "Std. Error"],
+    conf_high = summary(fit_re)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_re)$coefficients["pm25", "Std. Error"]
+  )
+)
+```
+
+## Fit a model with fixed effects at tract level
+```{r}
+# Extract tract FIPS code from GEOID (first 11 digits)
+ca_pm25$tract_fips <- substr(ca_pm25$GEOID, 1, 11)
+# Convert to factor
+ca_pm25$tract_fips <- as.factor(ca_pm25$tract_fips)
+fit_fe_tract <- glm(Y ~ pm25 + pov + log(density) + tract_fips,
+              offset = log(total_pop),
+              family = "poisson",
+              data = ca_pm25)
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "tract_fixed_effects",
+    estimate = summary(fit_fe_tract)$coefficients["pm25", "Estimate"],
+    conf_low = summary(fit_fe_tract)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_fe_tract)$coefficients["pm25", "Std. Error"],
+    conf_high = summary(fit_fe_tract)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_fe_tract)$coefficients["pm25", "Std. Error"]
+  )
+)
+```
+
+## Fit a model with random effects at the tract level
+```{r}
+fit_re_tract <- glmer(Y ~ pm25 + pov + log(density) + (1|tract_fips),
+                offset = log(total_pop),
+                family = "poisson",
+                data = ca_pm25)
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "tract_random_effects",
+    estimate = summary(fit_re_tract)$coefficients["pm25", "Estimate"],
+    conf_low = summary(fit_re_tract)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_re_tract)$coefficients["pm25", "Std. Error"],
+    conf_high = summary(fit_re_tract)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_re_tract)$coefficients["pm25", "Std. Error"]
+  )
+)
+```
+
+## Fit a conditional autoregressive model
+```{r}
+# Subset ca_pm25 to observations with nonmissing and finite Y, pm25, pov, log(density)
+ca_pm25_complete <- ca_pm25 %>%
+  filter(!is.na(Y) & is.finite(Y) &
+           !is.na(pm25) & is.finite(pm25) &
+           !is.na(pov) & is.finite(pov) &
+           !is.na(density) & is.finite(density))
+# Change GEOID to character using padding
+ca_pm25_complete$GEOID <- str_pad(as.character(ca_pm25_complete$GEOID), width = 12, pad = "0")
+# Subset ca_bg_shp to GEOIDs in ca_pm25_complete
+ca_bg_shp <- ca_bg_shp %>%
+  filter(GEOID %in% ca_pm25_complete$GEOID)
+bg <- st_make_valid(ca_bg_shp)
+
+nb <- poly2nb(bg, queen = TRUE)
+W  <- nb2mat(nb, style = "B", zero.policy = TRUE)  # 0/1 adjacency matrix
+spdep::nb2INLA(file = "bg.graph", nb = nb)
+g <- INLA::inla.read.graph("bg.graph")
+
+bg$id <- seq_len(nrow(bg))  # integer id 1..N
+
+# Assign bg pm25, pov, density, total_pop, Y to st_drop_geometry(bg) merging on GEOID
+bg <- bg %>%
+  left_join(
+    ca_pm25_complete %>%
+      dplyr::select(GEOID, pm25, pov, density, total_pop, Y),
+    by = "GEOID"
+  )
+fit_bym2 <- inla(
+  Y ~ pm25 + pov + log(density) +
+    f(id, model = "bym2", graph = g, scale.model = TRUE),
+  family = "poisson",   
+  data = st_drop_geometry(bg),
+  control.predictor = list(compute = TRUE)
+)
+summary(fit_bym2)
+results <- rbind.data.frame(
+  results,
+  data.frame(
+    method = "BYM2",
+    estimate = fit_bym2$summary.fixed["pm25", "mean"],
+    conf_low = fit_bym2$summary.fixed["pm25", "0.025quant"],
+    conf_high = fit_bym2$summary.fixed["pm25", "0.975quant"]
+  )
+)
+```
+
+## Plot results similar to above
+```{r}
+# Order results by Oracle, then Orindary GLM, then spatial, then spatial plus, then county fe, county re, tract re, CAR
+lvl <- c("oracle", "unadjusted", "spatial", "spatial_plus",
+         "county_fixed_effects", "county_random_effects",
+         "tract_random_effects", "BYM2")
+
+results <- results %>%
+  mutate(method = factor(method, levels = lvl))
+
+png("../figs/pm25_coefficients_comparison_all.png", width = 6, height = 4, units = "in", res = 350)
+ggplot(results, aes(x = estimate, y = method)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
+  geom_vline(xintercept = beta0, linetype = "dashed", color = "red") +
+  scale_y_discrete(limits = rev(lvl)) +   # <- puts oracle on top, BYM2 on bottom
+  theme_minimal() +
+  xlab("") + ylab("")
+dev.off()
+
+```
+
+## Diagnosing spatial confounding
+```{r}
+# let's extract the residuals from ordinary glm and see if they are spatially structured
+ca_pm25_complete$residuals_ols <- resid(fit_ols)
+coords <- cbind(ca_pm25_complete$cent_x,
+                ca_pm25_complete$cent_y)
+knn <- knearneigh(coords, k = 8)  # k = 5–10 is typical
+nb  <- knn2nb(knn)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+moran.test(
+  ca_pm25_complete$residuals_ols,
+  lw,
+  zero.policy = TRUE
+)
+
+# Calculate MOran's I for residuals_ols using the adjacency matrix W
+moran_ols <- moran.test(ca_pm25_complete$residuals_ols, listw = mat2listw(W), zero.policy = TRUE)
+print(moran_ols)
+# Merge with ca_bg_shp
+ca_bg_shp <- st_read("data/ca_bg_shapefile/tl_2016_06_bg.shp")
+ca_bg_shp <- ca_bg_shp %>%
+  left_join(st_drop_geometry(ca_pm25_complete) %>% dplyr::select(GEOID, residuals_ols), by = "GEOID")
+
+png("../figs/residuals_ols.png", width = 6, height = 5, units = "in", res = 300)
+ ggplot() +
+  geom_sf(data = ca_bg_shp, aes(fill = residuals_ols), color = NA, linewidth = NA) +
+  scale_fill_viridis_c(name = "Residuals from non-spatial GLM", na.value = "lightgrey", limits = c(-11,11)) +
+  # scale_fill_gradient2(name = "Residuals from non-spatial GLM", low = "lightblue", mid = "lightyellow", high = "red", na.value = "lightgrey",
+  #                      breaks = c(-10, -5, 0, 5, 10), limits = c(-6,6)
+  #                      ) +
+  theme_minimal() + #
+  theme(
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_line(color = "transparent"),
+    legend.background = element_rect(fill = alpha("white", 0.6)),
+    legend.position = "right"
+  )
+dev.off()
+```
+
+
+
+
+
+
+
+
