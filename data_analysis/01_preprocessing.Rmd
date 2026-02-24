@@ -1,0 +1,354 @@
+---
+title: "Preprocessing"
+author: "Sophie Woodward"
+date: "2026-02-24"
+output: html_document
+---
+
+This code is designed to create a dataset called `data/ca_bg_pm25_census_2016.csv` that contains average air pollution exposure and other variables for each census block group in California in 2016. 
+
+```{r}
+# Load necessary packages
+library(tidyverse)
+library(here)
+library(igraph)
+library(tidycensus)
+library(sf)
+library(lmtest)
+library(sandwich)
+library(stargazer)
+library(terra)
+library(exactextractr)
+library(mgcv)
+library(gridExtra)
+library(lme4)
+library(stringr)
+library(spdep)
+library(INLA)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(scales)
+
+options(tigris_use_cache = T)
+```
+
+## Import census block group shapefile, California 2016
+```{r}
+url <- "https://www2.census.gov/geo/tiger/TIGER2016/BG/tl_2016_06_bg.zip"
+temp <- tempfile()
+download.file(url, temp)
+unzip(temp, exdir = "data/ca_bg_shapefile")
+ca_bg_shp <- st_read("data/ca_bg_shapefile/tl_2016_06_bg.shp")
+unlink(temp)
+```
+
+## Read in 1km x 1km PM2.5 data from CAFE Dataverse, Di et al 2019
+See https://doi.org/10.7910/DVN/58C6HG for more information.
+```{r}
+# Query from the Dataverse API
+url <- "https://dataverse.harvard.edu/api/access/datafile/11072770"
+download.file(url, destfile = "data/annual_pm25.zip")
+unzip("data/annual_pm25.zip", exdir = "data/annual_pm25")
+pm25_1km_2016 <- readRDS("data/annual_pm25/annual-rds/PM25-2016.rds")
+
+grid_url <- "https://dataverse.harvard.edu/api/access/datafile/11071648"
+download.file(grid_url, destfile = "data/grid.csv")
+grid <- read.csv("data/grid.csv")
+# Assign PM to grid
+grid$pm <- pm25_1km_2016
+```
+
+## Aggregate PM2.5 to block group level
+Naively, let's just take the average of PM values of all grid cells that intersect each block group.
+```{r}
+ca_bg_ll <- st_transform(ca_bg_shp, 4326)
+bb <- st_bbox(ca_bg_ll)
+
+grid_ca <- grid[
+  grid$lon >= bb["xmin"] & grid$lon <= bb["xmax"] &
+  grid$lat >= bb["ymin"] & grid$lat <= bb["ymax"],
+]
+
+grid_sf_ll <- st_as_sf(grid_ca, coords = c("lon", "lat"), crs = 4326)
+
+crs_m <- 3310  # CA Albers coordinate system (meters)
+grid_sf <- st_transform(grid_sf_ll, crs_m)
+ca_bg  <- st_transform(ca_bg_shp, crs_m)
+
+# rasterize
+pts <- terra::vect(grid_sf)
+
+r <- terra::rast(terra::ext(pts), res = 1000, crs = terra::crs(pts))  # 1km cells
+pm_r <- terra::rasterize(pts, r, field = "pm", fun = mean, na.rm = TRUE)
+
+# block group polygon means
+ca_bg_pm25 <- ca_bg[, "GEOID"]
+ca_bg_pm25$pm25 <- exactextractr::exact_extract(pm_r, ca_bg_pm25, "mean")
+
+summary(ca_bg_pm25$pm25)
+
+# Plot as image 
+png("../figs/ca_bg_pm25.png", width = 6, height = 5, units = "in", res = 300)
+ggplot() +
+  geom_sf(data = ca_bg_pm25, aes(fill = pm25), color = NA) +
+  scale_fill_viridis_c(name = "PM2.5 (µg/m³)", na.value = "lightgrey") +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_line(color = "transparent"),
+    legend.background = element_rect(fill = alpha("white", 0.6))
+  )
+dev.off()
+
+```
+
+## Extract ACS 5 Year Census Data from 2012-2016
+```{r}
+# Set Census API key before proceeding
+# Variable names
+vars <- c(
+  # income / poverty
+  med_hh_income = "B19013_001", # in last year's inflation-adjusted dollars
+  med_home_value = "B25077_001", # 
+  pov_den = "B17010_001", pov_num = "B17010_002", # POVERTY STATUS IN THE PAST 12 MONTHS
+  # employment
+  emp_den     = "B23025_001", emp_num    = "B23025_002", # EMPLOYMENT STATUS FOR THE POPULATION 16 YEARS AND OVER
+  # education (25+)
+  HS_diploma    = "B15003_017", HS_equivalent = "B15003_018",
+  some_college  = "B15003_019", some_college_plus = "B15003_020",
+  assoc        = "B15003_021",
+  bach          = "B15003_022", master       = "B15003_023",
+  prof          = "B15003_024", doct         = "B15003_025", edu_den = "B15003_001",
+  # tenure
+  owner_occ     = "B25003_002", tenure_den   = "B25003_001", # TENURE 
+  # race / ethnicity
+  black         = "B02001_003", race_den     = "B02001_001",   # Black alone / total
+  hisp          = "B03003_003", hisp_den     = "B03003_001",   # Hispanic / total
+  # total population
+  total_pop     = "B01003_001", 
+  # median year structure built
+  med_year_built = "B25035_001",
+  # age < 5
+  age_denom = "B01001_001", age_u5_male = "B01001_003", age_u5_female = "B01001_027",
+  # age > 65
+  age_6566_male = "B01001_020", age_6769_male = "B01001_021", age_7074_male = "B01001_022",
+  age_7579_male = "B01001_023", age_8084_male = "B01001_024", age_85up_male = "B01001_025",
+  age_6566_female = "B01001_044", age_6769_female = "B01001_045", age_7074_female = "B01001_046",
+  age_7579_female = "B01001_047", age_8084_female = "B01001_048", age_85up_female = "B01001_049"
+)
+
+expected_E_cols <- paste0(names(vars), "E")
+
+pull_one_year <- function(y) {
+  # Only request variables that are available
+  lv <- load_variables(y, "acs5", cache = TRUE)
+  present <- names(vars)[vars %in% lv$name]
+  vars_y  <- vars[present]
+  if (length(vars_y) == 0) return(tibble())
+  
+  df <- get_acs(
+    geography = "block group",
+    state = "CA", 
+    variables = vars_y,
+    year = y, survey = "acs5",
+    cache_table = TRUE, geometry = TRUE, output = "wide"
+  )
+  
+  # Back-fill any missing expected columns with NA 
+  for (col in setdiff(expected_E_cols, names(df))) df[[col]] <- NA_real_
+  
+  df %>%
+    transmute(
+      GEOID, NAME, year = y,
+      
+      med_hh_income = med_hh_incomeE,
+      med_home_value = med_home_valueE,
+      pov_rate      = ifelse(pov_denE     > 0, pov_numE / pov_denE, NA_real_),
+      emp_rate    = ifelse(emp_denE   > 0, emp_numE   / emp_denE,   NA_real_),
+      
+      grad_HS     = ifelse(edu_denE     > 0, (HS_diplomaE + HS_equivalentE + some_collegeE + some_college_plusE + assocE +
+                                                bachE + masterE + profE + doctE) / edu_denE, NA_real_),
+      
+      homeown_rate  = ifelse(tenure_denE  > 0, owner_occE   / tenure_denE,  NA_real_),
+      
+      pct_black     = ifelse(race_denE    > 0, blackE       / race_denE,    NA_real_),
+      pct_hispanic  = ifelse(hisp_denE    > 0, hispE        / hisp_denE,    NA_real_),
+      total_pop = total_popE,
+      med_year_built = med_year_builtE,
+      pct_under5 = ifelse(age_denomE > 0, (age_u5_maleE + age_u5_femaleE) / age_denomE, NA_real_),
+      pct_over65 = ifelse(age_denomE > 0, (age_6566_maleE + age_6769_maleE + age_7074_maleE +
+                                             age_7579_maleE + age_8084_maleE + age_85up_maleE +
+                                             age_6566_femaleE + age_6769_femaleE + age_7074_femaleE +
+                                              age_7579_femaleE + age_8084_femaleE + age_85up_femaleE) / age_denomE, NA_real_)
+      
+    )
+}
+# Pull just 2016 california
+ca_census_2016 <- pull_one_year(2016)
+```
+
+## Merge the census data with the PM2.5 data
+```{r}
+mean(ca_census_2016$GEOID %in% ca_bg_pm25$GEOID) # 1
+mean(ca_bg_pm25$GEOID %in% ca_census_2016$GEOID) # 1
+ca_pm25 <- merge(ca_bg_pm25, st_drop_geometry(ca_census_2016), by = "GEOID")
+ca_pm25 <- ca_pm25 %>%
+  mutate(
+    area_km2 = as.numeric(st_area(geometry)) / 1e6,
+    pov = pov_rate,
+    density = total_pop / area_km2
+  )
+# Get centroids of each block group and save coordinates as well
+ca_pm25 <- ca_pm25 %>%
+  mutate(
+    centroid = st_centroid(geometry),
+    cent_x = st_coordinates(centroid)[,1],
+    cent_y = st_coordinates(centroid)[,2]
+  ) %>%
+  select(-centroid)
+
+summary(ca_pm25)
+```
+
+
+## Read in health center data
+```{r}
+url <- "https://data.chhs.ca.gov/dataset/3b5b80e8-6b8d-4715-b3c0-2699af6e72e5/resource/f0ae5731-fef8-417f-839d-54a0ed3a126e/download/health_facility_locations.csv"
+download.file(url, destfile = "data/health_facility_locations.csv")
+health <- read.csv('data/health_facility_locations.csv')
+health_sf <- st_as_sf(health, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+health_sf <- st_transform(health_sf, 3310) # CA Albers (meters)
+
+ca_pm25_sf <- st_as_sf(ca_pm25, coords = c("cent_x", "cent_y"), 
+                       crs = 3310)
+# Get distances to nearest health facility for each block group centroid
+# D <- st_distance(ca_pm25_sf, health_sf)
+# ca_pm25$D_min_m <- apply(D, 1, min)
+idx <- st_nearest_feature(ca_pm25_sf, health_sf)
+ca_pm25$D_min_m <- st_distance(
+  ca_pm25_sf,
+  health_sf[idx, ],
+  by_element = TRUE
+)
+# Convert to km
+ca_pm25$D_min_km <- ca_pm25$D_min_m / 1000
+summary(ca_pm25$D_min_km)
+# Convert units to numeric
+ca_pm25$D_min_km <- as.numeric(ca_pm25$D_min_km)
+# Convert ca_pm25$GEOID to character, padding with 0 at front
+ca_pm25$GEOID <- str_pad(as.character(ca_pm25$GEOID), width = 12, pad = "0")
+# Merge with ca_pm25
+ca_bg_shp <- ca_bg_shp %>%
+  left_join(st_drop_geometry(ca_pm25) %>%
+              dplyr::select(D_min_km, GEOID), by = "GEOID")
+
+# Plot distance to nearest health facility
+png('../figs/distance_to_health_facility_ca.png', width = 6, 
+    height = 5, units = 'in', res = 300)
+ggplot() + 
+  geom_sf(data = ca_bg_shp, aes(fill = D_min_km), color = NA) +
+  scale_fill_viridis_c(name = "km to nearest\nCA health facility", na.value = "lightgrey", option = 'magma') +
+  theme_minimal() + # remove gridlines and background
+  theme(
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_line(color = "transparent"),
+    legend.background = element_rect(fill = alpha("white", 0.6)),
+    legend.position = "right"
+  )
+dev.off()
+```
+
+## Read in NDVI data
+```{r}
+# https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/V0BDE7
+ndvi <- read.csv('data/ndvi_seasonal_zip20002016.csv')
+ndvi <- ndvi %>%
+  filter(year == 2016) %>%
+  select(ZIP, NDVI_summer)
+# Convert ndvi zip to five digit character padding with zeros
+ndvi$ZIP <- str_pad(as.character(ndvi$ZIP), width = 5, pad = "0")
+
+# zip to zcta crosswalk
+# https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/HYNJSZ
+xwalk <- read.csv('data/zip2zcta_master_xwalk.csv')
+# Convert both zip and zcta to 5 digit characters with padding
+xwalk$zip <- str_pad(as.character(xwalk$zip), width = 5, pad = "0")
+xwalk$zcta <- str_pad(as.character(xwalk$zcta), width = 5, pad = "0")
+# Create zcta as column in ndvi by merging with xwalk
+ndvi <- ndvi %>%
+  left_join(xwalk %>% dplyr::select(zip, zcta), by = c("ZIP" = "zip")) %>%
+  select(ZIP, zcta, NDVI_summer)
+
+# Read in zip code shapefile
+url <- "https://www2.census.gov/geo/tiger/TIGER2016/ZCTA5/tl_2016_us_zcta510.zip"
+temp <- tempfile()
+download.file(url, temp)
+unzip(temp, exdir = "data/")
+zip_shp <- st_read("data/tl_2016_us_zcta510.shp")
+# Merge ndvi with zip_shp by matching ndvi$zcta with zip_shp$ZCTA5CE10
+zip_shp <- zip_shp %>%
+  left_join(ndvi, by = c("ZCTA5CE10" = "zcta"))
+
+# Plot ndvi in California 
+st_crs(zip_shp) == st_crs(ca_bg_shp) # TRUE, both are in NAD83
+# Assign NDVI_summer to ca_bg_shp by spatial aggregation
+bb <- st_as_sfc(st_bbox(ca_bg_shp))
+zip_ca <- zip_shp[ lengths(st_intersects(zip_shp, bb)) > 0, c("NDVI_summer") ]
+
+# 2) Build intersection index (list of zip indices per bg)
+idx <- st_intersects(ca_bg_shp, zip_ca)  # sparse list, fast
+
+# 3) Compute mean NDVI for each bg (or GEOID) without expanding a join
+bg_ndvi <- vapply(idx, function(ii) mean(zip_ca$NDVI_summer[ii], na.rm = TRUE), numeric(1))
+
+ca_bg_shp$NDVI_summer <- bg_ndvi
+summary(bg_ndvi)
+
+png('../figs/ndvi_summer_2016.png', width = 6, height = 5, units = 'in', res = 300)
+ggplot() +
+  geom_sf(data = ca_bg_shp, aes(fill = NDVI_summer), color = NA) + # plot from white to green 0 to 1
+  scale_fill_gradient(name = "NDVI (Summer 2016)", low = "white", high = "darkgreen", na.value = "lightgrey") +
+  #scale_fill_viridis_c(name = "NDVI (Summer 2016)", na.value = "lightgrey", option = 'mako') +
+  #scale_fill_viridis_c(name = "NDVI (Summer 2016)", na.value = "lightgrey") +
+  theme_minimal() + # remove gridlines and
+  theme(
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    panel.grid = element_line(color = "transparent"),
+    legend.background = element_rect(fill = alpha("white", 0.6)),
+    legend.position = "right"
+  )
+dev.off()
+
+# Merge with ca_pm25
+ca_pm25 <- ca_pm25 %>%
+  left_join(st_drop_geometry(ca_bg_shp) %>% dplyr::select(GEOID, NDVI_summer), by = "GEOID") %>%
+  rename(ndvi = NDVI_summer)
+```
+
+## Print five rows at random
+```{r}
+summary(ca_pm25)
+write.csv(st_drop_geometry(ca_pm25), "data/ca_bg_pm25_census_2016.csv", row.names = F)
+
+# Sample 5 rows at random, distance, ndvi, PM2.5, poverty, density
+# Round distance, ndvi, pm, poverty density to 2 decimal places
+set.seed(122)
+print(ca_pm25 %>%
+  st_drop_geometry %>%
+  select(GEOID, D_min_km, ndvi, pov, density, pm25) %>% 
+  mutate(
+    D_min_km = round(D_min_km, 2),
+    ndvi = round(ndvi, 2),
+    pov = round(pov, 2),
+    density = round(density, 2),
+    pm25 = round(pm25, 2)
+  ) %>%
+  sample_n(5), row.names = F)
+```
