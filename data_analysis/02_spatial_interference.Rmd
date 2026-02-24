@@ -1,0 +1,165 @@
+---
+title: "Spatial interference example"
+output: html_document
+---
+
+# Spatial interference
+First, load some packages.
+```{r}
+# Load necessary packages
+library(sf)
+library(tidyverse)
+library(igraph)
+
+```
+
+Next, load the data.
+```{r}
+
+ca_pm25 <- read.csv("data_analysis/data/ca_bg_pm25_census_2016.csv")
+ca_pm25$GEOID <- str_pad(as.character(ca_pm25$GEOID), width = 12, pad = "0")
+
+# Work with a clean dataset
+ca_pm25 <- ca_pm25 %>% drop_na()
+```
+
+Load interference graph from LEHD and process into an interference graph (just for reproducibility; this takes a long time so just load the pre-saved CSV file).
+
+```{r}
+od_raw <- vroom::vroom("data_analysis/data/ca_od_main_JT00_2016.csv.gz", show_col_types = FALSE)
+ca_pm25_small <- ca_pm25 %>% select(GEOID, total_pop)
+# Clean the LEHD data into an interference matrix
+# that represents the proportion of the population commuting from each BG into every other BG
+od_bg <- od_raw %>% mutate(w_geocode = substr(w_geocode, 1, 12),
+                               h_geocode = substr(h_geocode, 1, 12)) %>%
+    group_by(w_geocode, h_geocode) %>%
+    # We summarize for each county
+    summarize(weight = sum(S000)) %>%
+    ungroup() %>% 
+    right_join(ca_pm25_small, by = c("h_geocode" = "GEOID"), keep = F) %>%
+    # calculate proportion of commuters by population of home geocode
+    mutate(weight = weight / total_pop)
+
+# Add filler rows for geocodes that don't commute to each other
+od_bg[is.na(od_bg$weight), "weight"] <- 0
+od_bg[is.na(od_bg$w_geocode), "w_geocode"] <- od_bg[is.na(od_bg$w_geocode), "h_geocode"]
+
+
+write.csv(od_bg, "data_analysis/data/ca_od_bg.csv", row.names = F)
+```
+
+```{r}
+# Turn interference edgelist into adjacency matrix
+od_bg <- read.csv("data_analysis/data/ca_od_bg.csv")
+od_graph = graph_from_data_frame(od_bg, directed=T)
+G = as_adjacency_matrix(od_graph, attr = "weight")
+diag(G) = 0
+
+# Remove irrelevant rows and columns from G that are not in ca_pm25
+inds = colnames(G) %in% substr(ca_pm25$GEOID, 2, 13)
+G = G[inds, inds]
+
+# Generate interference terms
+ca_pm25$friends <- as.vector(G %*% rep(1, nrow(ca_pm25)))
+ca_pm25$pm25_int <- as.vector(G %*% ca_pm25$pm25)
+ca_pm25$pov_int <- as.vector(G %*% ca_pm25$pov)
+ca_pm25$density_int <- as.vector(G %*% log(ca_pm25$density))
+
+sortperm = order(ca_pm25$GEOID)
+ca_pm25 = ca_pm25[sortperm, ]
+G = G[sortperm, sortperm]
+
+# What's the density of the graph?
+sum(G != 0) / (nrow(G) * ncol(G))
+
+set.seed(1234)
+
+beta0 <- 0.05
+beta1 <- 4
+beta2 <- -0.4
+beta0_int <- 0.1
+beta1_int <- 8
+beta2_int <- -0.8
+
+# Generate spatial interference model
+mu <-  beta0*ca_pm25$pm25 + 
+  beta0_int*ca_pm25$pm25_int +  # interference term
+  beta1*ca_pm25$pov +
+  beta1_int*ca_pm25$pov_int +  # confounder of interference term
+  beta2*log(ca_pm25$density) +
+  beta2_int*ca_pm25$density_int + 5  # confounder of interference term
+  
+# Generate two types of outcomes: continuous and count
+ca_pm25$Y1 <- mu + rnorm(nrow(ca_pm25),0,1)
+ca_pm25$Y2 <- rpois(n = nrow(ca_pm25), lambda = exp(mu/20 + 1)/200 * ca_pm25$total_pop)
+
+```
+
+
+```{r}
+Fbar = sum(G) / nrow(ca_pm25)
+true_sample_mte = beta0 + beta0_int * Fbar
+
+# Run linear glm, no interference
+fit_lm <- lm(Y1 ~ pm25 + pov + log(density), data = ca_pm25)
+mte = coef(fit_lm)["pm25"]
+mte_ci = coefci(fit_lm, vcov = vcovHC(fit_lm, "HC5"))["pm25", ]
+mte_ci = c(mte, mte_ci)
+mte_ci
+
+# Run linear glm
+fit_lm_int <- lm(Y1 ~ pm25 + pm25_int + pov + pov_int + log(density) + density_int + friends, data = ca_pm25)
+
+# Compute estimate accounting for interference
+mte_int = coef(fit_lm_int)["pm25"] + Fbar * coef(fit_lm_int)["pm25_int"]
+
+# Compute its variance and confidence interval
+V = vcovHC(fit_lm_int, "HC")
+mte_var = V["pm25", "pm25"] + 
+    (Fbar^2) * V["pm25_int", "pm25_int"] + 
+    2 * Fbar * V["pm25", "pm25_int"]
+
+mte_int_ci = mte_int + c("2.5%" = -1, "97.5%" = 1) * 1.96 * sqrt(mte_var)
+mte_int_ci = c(mte_int, mte_int_ci)
+mte_int_ci
+
+```
+
+Create plot
+
+```{r}
+df_plot <- data.frame(
+  method = factor(c("No Interference", "Interference"),
+                  levels = c("Interference", "No Interference")),
+  mean  = c(mte_ci[1], mte_int_ci[1]),
+  lower = c(mte_ci[2], mte_int_ci[2]),
+  upper = c(mte_ci[3], mte_int_ci[3])
+)
+
+ggplot(df_plot, aes(x = mean, y = method, color = method)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(xmin = lower, xmax = upper), width = 0.4, linewidth = 1) +
+  geom_vline(xintercept = true_sample_mte, color = "darkgreen") +
+  geom_text(aes(x=true_sample_mte+0.0025, label="True MTE", y=2), colour="darkgreen", angle=90, text=element_text(size=11)) +
+  labs(
+    x = expression("MTE of " * PM[2.5] * " on continuous outcome"),
+    y = "",
+    title = ""
+  ) +
+  scale_color_manual(values = c("Interference" = "#002e5c", "No Interference" = "#C67700")) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(margin = margin(t = 10))
+  )
+
+# Save as vector PDF for publication and PNG for web/preview
+ggsave(filename = here("figs", "mte_pm25.pdf"),
+  plot = last_plot(),
+  device = "pdf",
+  width = 5, height = 3, units = "in")
+
+ggsave(filename = here("figs", "mte_pm25.png"),
+  plot = last_plot(),
+  width = 5, height = 3, units = "in", dpi = 300)
+```
