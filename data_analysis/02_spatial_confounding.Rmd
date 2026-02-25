@@ -18,16 +18,38 @@ library(viridis)
 library(scales)
 ```
 
-## Generate synthetic outcome
-```{r}
+## Before starting
+
+1) Ensure that you have a folder in this directory called "data"; if not, create it. 
+2) Download the dataset from CAFE Dataverse (https://doi.org/10.7910/DVN/TN9JTT) as a csv and place it in the "data" folder. The file should be named "ca_bg_pm25_census_2016.csv".
+3) Ensure that you have a folder in this directory called "figs"; if not, create it. This is where the output figures will be saved.
+
+## Import census block group shapefile, California 2016, for plotting
+```{r importshapefile}
+url <- "https://www2.census.gov/geo/tiger/TIGER2016/BG/tl_2016_06_bg.zip"
+temp <- tempfile()
+download.file(url, temp)
+unzip(temp, exdir = "data/ca_bg_shapefile")
+ca_bg_shp <- st_read("data/ca_bg_shapefile/tl_2016_06_bg.shp")
+unlink(temp)
+```
+
+## Read in dataset
+```{r readdata}
 ca_pm25 <- read.csv('data/ca_bg_pm25_census_2016.csv')
+# Convert GEOID to character using padding
+ca_pm25$GEOID <- str_pad(ca_pm25$GEOID, width = 12, pad = "0")
+```
+
+## Generate synthetic outcome
+```{r syntheticoutcome}
 set.seed(1234)
 
 beta0 <- 0.05
 beta1 <- 0.25
 beta2 <- 0.1
-beta3 <- 0.5 # 0.5
-beta4 <- -0.2
+beta3 <- 0.5
+beta4 <- -0.05
 
 mu <-  beta0*ca_pm25$pm25 + 
   beta1*ca_pm25$pov +
@@ -35,17 +57,19 @@ mu <-  beta0*ca_pm25$pm25 +
   beta3*ca_pm25$ndvi +
   beta4*ca_pm25$D_min_km +
   rnorm(nrow(ca_pm25),0,0.5)
-
 # Generate disease counts using population (ca_pm25$total_pop) and mu
-ca_pm25$Y <- rpois(nrow(ca_pm25), exp(mu)/10 * ca_pm25$total_pop)
+ca_pm25$Y <- rpois(nrow(ca_pm25), exp(mu)/100 * ca_pm25$total_pop)
 summary(ca_pm25$Y)
+```
 
+## Fit an oracle method (which adjusts for the unmeasured spatial confounders)
+```{r oracle}
 # Run glm poisson
 fit_glm <- glm(Y ~ pm25 + pov + log(density) + ndvi + D_min_km,
                offset = log(total_pop),
                family = "poisson",
                data = ca_pm25)
-summary(fit_glm) # ORACLE: coefficients look good
+summary(fit_glm) # coefficients look good
 results <- data.frame(
   method = "oracle",
   estimate = summary(fit_glm)$coefficients["pm25", "Estimate"],
@@ -54,14 +78,14 @@ results <- data.frame(
 )
 ```
 
-## Spatial method 
-```{r}
+## Fit spatial method 
+```{r spatial}
 fit_spatial <- gam(
   Y ~ pm25 + # exposure
     pov + log(density) + # covariates
     s(cent_x, # x coordinate of block group centroid
       cent_y, # y coordinate of block group centroid
-      k = 100, # basis dimension
+      k = 75, # basis dimension
       fx = T), # apply smoothing
   family = poisson(link = "log"), # Outcome is disease rate
   offset = log(total_pop), # offset of population
@@ -69,10 +93,6 @@ fit_spatial <- gam(
   method = "GCV.Cp"
 )
 summary(fit_spatial)$p.coeff["pm25"]
-```
-
-## Save spatial results
-```{r}
 results <- rbind.data.frame(
   results,
   data.frame(
@@ -85,10 +105,10 @@ results <- rbind.data.frame(
 ```
 
 ## Spatial plus Step 1
-```{r}
+```{r spatialplus1}
 f_X_hat <- gam(pm25 ~ s(cent_x, # x coordinate of block group centroid
                         cent_y, # y coordinate of block group centroid
-                        k = 100, # basis dimension
+                        k = 75, # basis dimension
                         fx = T), # apply smoothing
                data = ca_pm25,
                method = 'GCV.Cp') # Generalized Cross Validation
@@ -98,11 +118,12 @@ summary(f_X_hat)
 ```
 
 ## Spatial plus Step 2
-```{r}
+```{r spatialplus2}
+# Depending on the degrees of freedom k, this can take a long time to run
 fit_spatial_plus <- mgcv::gam(
   Y ~ residuals_pm25 + # residuals of PM 2.5 from the previous regression
     pov + log(density) + # covariates
-    s(cent_x, cent_y, k = 100, fx = T), # another thin plate spline of coordinates
+    s(cent_x, cent_y, k = 75, fx = T), # another thin plate spline of coordinates
   family = poisson(link = "log"), # Outcome is disease rate
   offset = log(total_pop), # offset of population
   data = ca_pm25,
@@ -111,12 +132,12 @@ fit_spatial_plus <- mgcv::gam(
 ```
 
 ## Report results
-```{r}
+```{r spatialplusreport}
 print(paste("Estimate:", summary(fit_spatial_plus)$p.coeff["residuals_pm25"]))
 ```
 
 ## Save results
-```{r}
+```{r spatialplussave}
 summary(fit_spatial_plus)
 # Save coefficient of residuals_pm25 and confidence interval in a data frame
 results <- rbind.data.frame(
@@ -131,7 +152,7 @@ results <- rbind.data.frame(
 ```
 
 ## Plot PM2.5, the fitted values, and residuals
-```{r}
+```{r plotspatialplus}
 ca_bg_shp <- ca_bg_shp %>%
   left_join(st_drop_geometry(ca_pm25) %>% dplyr::select(GEOID, pm25, smoothed_pm25, residuals_pm25), by = "GEOID")
 g1 <- ggplot() +
@@ -170,14 +191,14 @@ g3 <- ggplot() +
     legend.background = element_rect(fill = alpha("white", 0.6)),
     legend.position = "bottom"
   )
-png("../figs/ca_bg_pm25_spatialplus.png", width = 12, height = 5, units = "in", res = 300)
+png("figs/ca_bg_pm25_spatialplus.png", width = 12, height = 5, units = "in", res = 300)
 grid.arrange(g1, g2, g3, ncol = 3)
 dev.off()
 ```
 
-## Ordinary GLM
-```{r}
-# Compare to ordinary glm
+## Unadjusted GLM
+```{r unadjustedglm}
+# Compare to unadjusted glm
 fit_ols <- glm(Y ~ pm25 + pov + log(density),
                offset = log(total_pop),
                family = "poisson",
@@ -185,12 +206,12 @@ fit_ols <- glm(Y ~ pm25 + pov + log(density),
 summary(fit_ols)
 ```
 
-## Save Ordinary GLM results
-```{r}
+## Save unadjusted GLM results
+```{r unadjustedglmsave}
 results <- rbind.data.frame(
   results,
   data.frame(
-    method = "ordinary_glm",
+    method = "unadjusted",
     estimate = summary(fit_ols)$coefficients["pm25", "Estimate"],
     conf_low = summary(fit_ols)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_ols)$coefficients["pm25", "Std. Error"],
     conf_high = summary(fit_ols)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_ols)$coefficients["pm25", "Std. Error"]
@@ -199,13 +220,11 @@ results <- rbind.data.frame(
 ```
 
 ## Plot the results
-```{r}
+```{r plotresults}
 # vertical line for true coef (beta0)
 # Order results by Oracle, then Orindary GLM, then spatial, then spatial plus
-results$method <- factor(results$method, levels = c("oracle", "ordinary_glm", "spatial", "spatial_plus"))
-# Rename ordinary_glm as unadjusted
-results$method <- recode(results$method, ordinary_glm = "unadjusted")
-png("../figs/pm25_coefficients_comparison.png", width = 6, height = 4, units = "in", res = 350)
+results$method <- factor(results$method, levels = c("oracle", "unadjusted", "spatial", "spatial_plus"))
+png("figs/pm25_coefficients_comparison.png", width = 6, height = 4, units = "in", res = 350)
 ggplot(results, aes(x = estimate, y = method)) +
   geom_point() +
   geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
@@ -222,7 +241,7 @@ dev.off()
 ```
 
 ## Fit a model with fixed effects at the county level
-```{r}
+```{r countyfe}
 # Extract county FIPS code from GEOID (first 5 digits)
 ca_pm25$county_fips <- substr(ca_pm25$GEOID, 1, 5)
 # Convert to factor
@@ -243,7 +262,7 @@ results <- rbind.data.frame(
 ```
 
 ## Fit a model with random effects at the county level
-```{r}
+```{r countyre}
 fit_re <- glmer(Y ~ pm25 + pov + log(density) + (1|county_fips),
                 offset = log(total_pop),
                 family = "poisson",
@@ -259,29 +278,13 @@ results <- rbind.data.frame(
 )
 ```
 
-## Fit a model with fixed effects at tract level
-```{r}
+## Fit a model with random effects at the tract level
+```{r tractre}
 # Extract tract FIPS code from GEOID (first 11 digits)
 ca_pm25$tract_fips <- substr(ca_pm25$GEOID, 1, 11)
 # Convert to factor
 ca_pm25$tract_fips <- as.factor(ca_pm25$tract_fips)
-fit_fe_tract <- glm(Y ~ pm25 + pov + log(density) + tract_fips,
-              offset = log(total_pop),
-              family = "poisson",
-              data = ca_pm25)
-results <- rbind.data.frame(
-  results,
-  data.frame(
-    method = "tract_fixed_effects",
-    estimate = summary(fit_fe_tract)$coefficients["pm25", "Estimate"],
-    conf_low = summary(fit_fe_tract)$coefficients["pm25", "Estimate"] - 1.96 * summary(fit_fe_tract)$coefficients["pm25", "Std. Error"],
-    conf_high = summary(fit_fe_tract)$coefficients["pm25", "Estimate"] + 1.96 * summary(fit_fe_tract)$coefficients["pm25", "Std. Error"]
-  )
-)
-```
 
-## Fit a model with random effects at the tract level
-```{r}
 fit_re_tract <- glmer(Y ~ pm25 + pov + log(density) + (1|tract_fips),
                 offset = log(total_pop),
                 family = "poisson",
@@ -298,7 +301,7 @@ results <- rbind.data.frame(
 ```
 
 ## Fit a conditional autoregressive model
-```{r}
+```{r car}
 # Subset ca_pm25 to observations with nonmissing and finite Y, pm25, pov, log(density)
 ca_pm25_complete <- ca_pm25 %>%
   filter(!is.na(Y) & is.finite(Y) &
@@ -308,6 +311,7 @@ ca_pm25_complete <- ca_pm25 %>%
 # Change GEOID to character using padding
 ca_pm25_complete$GEOID <- str_pad(as.character(ca_pm25_complete$GEOID), width = 12, pad = "0")
 # Subset ca_bg_shp to GEOIDs in ca_pm25_complete
+ca_bg_shp <- st_read("data/ca_bg_shapefile/tl_2016_06_bg.shp") # reset 
 ca_bg_shp <- ca_bg_shp %>%
   filter(GEOID %in% ca_pm25_complete$GEOID)
 bg <- st_make_valid(ca_bg_shp)
@@ -317,7 +321,7 @@ W  <- nb2mat(nb, style = "B", zero.policy = TRUE)  # 0/1 adjacency matrix
 spdep::nb2INLA(file = "bg.graph", nb = nb)
 g <- INLA::inla.read.graph("bg.graph")
 
-bg$id <- seq_len(nrow(bg))  # integer id 1..N
+bg$id <- seq_len(nrow(bg))  
 
 # Assign bg pm25, pov, density, total_pop, Y to st_drop_geometry(bg) merging on GEOID
 bg <- bg %>%
@@ -345,8 +349,8 @@ results <- rbind.data.frame(
 )
 ```
 
-## Plot results similar to above
-```{r}
+## Plot all results on a single plot
+```{r plotallresults}
 # Order results by Oracle, then Orindary GLM, then spatial, then spatial plus, then county fe, county re, tract re, CAR
 lvl <- c("oracle", "unadjusted", "spatial", "spatial_plus",
          "county_fixed_effects", "county_random_effects",
@@ -355,7 +359,7 @@ lvl <- c("oracle", "unadjusted", "spatial", "spatial_plus",
 results <- results %>%
   mutate(method = factor(method, levels = lvl))
 
-png("../figs/pm25_coefficients_comparison_all.png", width = 6, height = 4, units = "in", res = 350)
+png("figs/pm25_coefficients_comparison_all.png", width = 6, height = 4, units = "in", res = 350)
 ggplot(results, aes(x = estimate, y = method)) +
   geom_point() +
   geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
@@ -366,53 +370,3 @@ ggplot(results, aes(x = estimate, y = method)) +
 dev.off()
 
 ```
-
-## Diagnosing spatial confounding
-```{r}
-# let's extract the residuals from ordinary glm and see if they are spatially structured
-ca_pm25_complete$residuals_ols <- resid(fit_ols)
-coords <- cbind(ca_pm25_complete$cent_x,
-                ca_pm25_complete$cent_y)
-knn <- knearneigh(coords, k = 8)  # k = 5–10 is typical
-nb  <- knn2nb(knn)
-lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
-moran.test(
-  ca_pm25_complete$residuals_ols,
-  lw,
-  zero.policy = TRUE
-)
-
-# Calculate MOran's I for residuals_ols using the adjacency matrix W
-moran_ols <- moran.test(ca_pm25_complete$residuals_ols, listw = mat2listw(W), zero.policy = TRUE)
-print(moran_ols)
-# Merge with ca_bg_shp
-ca_bg_shp <- st_read("data/ca_bg_shapefile/tl_2016_06_bg.shp")
-ca_bg_shp <- ca_bg_shp %>%
-  left_join(st_drop_geometry(ca_pm25_complete) %>% dplyr::select(GEOID, residuals_ols), by = "GEOID")
-
-png("../figs/residuals_ols.png", width = 6, height = 5, units = "in", res = 300)
- ggplot() +
-  geom_sf(data = ca_bg_shp, aes(fill = residuals_ols), color = NA, linewidth = NA) +
-  scale_fill_viridis_c(name = "Residuals from non-spatial GLM", na.value = "lightgrey", limits = c(-11,11)) +
-  # scale_fill_gradient2(name = "Residuals from non-spatial GLM", low = "lightblue", mid = "lightyellow", high = "red", na.value = "lightgrey",
-  #                      breaks = c(-10, -5, 0, 5, 10), limits = c(-6,6)
-  #                      ) +
-  theme_minimal() + #
-  theme(
-    axis.title = element_blank(),
-    axis.ticks = element_blank(),
-    axis.text = element_blank(),
-    panel.grid = element_line(color = "transparent"),
-    legend.background = element_rect(fill = alpha("white", 0.6)),
-    legend.position = "right"
-  )
-dev.off()
-```
-
-
-
-
-
-
-
-
