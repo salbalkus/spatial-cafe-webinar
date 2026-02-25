@@ -7,6 +7,8 @@ output: html_document
 
 This code is designed to create a dataset called `data/ca_bg_pm25_census_2016.csv` that contains average air pollution exposure and other variables for each census block group in California in 2016. 
 
+**NOTE**: you do not need to run this file before running `02_spatialconfounding.Rmd` and `02_spatial_interference.Rmd`. The preprocessed dataset is on CAFE dataverse and can be downloaded before starting; see `02_spatialconfounding.Rmd` for instructions. This code is simply provided to show how the dataset was created.
+
 ```{r}
 # Load necessary packages
 library(tidyverse)
