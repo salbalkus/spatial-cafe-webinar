@@ -13,12 +13,26 @@ library(tidyverse)
 library(igraph)
 library(sandwich)
 library(here)
+library(dataverse)
+Sys.setenv("DATAVERSE_SERVER" = "dataverse.harvard.edu")
+
 ```
 
 Next, load the data. For this tutorial, we will use Longitudinal Employer-Household Dynamics data 
 to represent the network denoting interference between units.
 ```{r}
-ca_pm25 <- read.csv("data/ca_bg_pm25_census_2016.csv")
+# Download data from dataverse
+ca_pm25 <- get_dataframe_by_name(
+  filename = "ca_bg_pm25_census_2016.tab",
+  dataset = "10.7910/DVN/TN9JTT",
+  server = "https://dataverse.harvard.edu/",
+  .f = read_csv, # Use an appropriate function to read the original file type (e.g., haven::read_dta for Stata, readr::read_csv for CSV)
+  original = TRUE # Specify to download the original file version
+)
+
+# Alternatively we could just access from the folder if we ran preprocessing earlier
+#ca_pm25 <- read.csv("data/ca_bg_pm25_census_2016.csv")
+
 ca_pm25$GEOID <- str_pad(as.character(ca_pm25$GEOID), width = 12, pad = "0")
 
 # Work with a clean dataset
