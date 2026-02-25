@@ -4,18 +4,20 @@ output: html_document
 ---
 
 # Spatial interference
+This is a small tutorial on using linear models to adjust for spatial (or network) interference. 
 First, load some packages.
 ```{r}
 # Load necessary packages
 library(sf)
 library(tidyverse)
 library(igraph)
-
+library(sandwich)
+library(here)
 ```
 
-Next, load the data.
+Next, load the data. For this tutorial, we will use Longitudinal Employer-Household Dynamics data 
+to represent the network denoting interference between units.
 ```{r}
-
 ca_pm25 <- read.csv("data_analysis/data/ca_bg_pm25_census_2016.csv")
 ca_pm25$GEOID <- str_pad(as.character(ca_pm25$GEOID), width = 12, pad = "0")
 
@@ -23,7 +25,8 @@ ca_pm25$GEOID <- str_pad(as.character(ca_pm25$GEOID), width = 12, pad = "0")
 ca_pm25 <- ca_pm25 %>% drop_na()
 ```
 
-Load interference graph from LEHD and process into an interference graph (just for reproducibility; this takes a long time so just load the pre-saved CSV file).
+Load interference graph from LEHD and process it into a data structure we can save to a file. 
+Since this takes a long time, we save the data to load later without needing to run this chunk.
 
 ```{r}
 od_raw <- vroom::vroom("data_analysis/data/ca_od_main_JT00_2016.csv.gz", show_col_types = FALSE)
@@ -48,6 +51,9 @@ od_bg[is.na(od_bg$w_geocode), "w_geocode"] <- od_bg[is.na(od_bg$w_geocode), "h_g
 write.csv(od_bg, "data_analysis/data/ca_od_bg.csv", row.names = F)
 ```
 
+Next, we turn the edgelist into an adjacency matrix, and generate some sample data
+to demonstrate the method. Notice how we construct "interference terms" by multiplying
+the interference adjacency matrix by each column (including the intercept column of ones).
 ```{r}
 # Turn interference edgelist into adjacency matrix
 od_bg <- read.csv("data_analysis/data/ca_od_bg.csv")
@@ -91,11 +97,12 @@ mu <-  beta0*ca_pm25$pm25 +
   
 # Generate two types of outcomes: continuous and count
 ca_pm25$Y1 <- mu + rnorm(nrow(ca_pm25),0,1)
-ca_pm25$Y2 <- rpois(n = nrow(ca_pm25), lambda = exp(mu/20 + 1)/200 * ca_pm25$total_pop)
 
 ```
 
-
+Finally, we estimate the "modified treatment effect" (MTE) of increasing each unit's exposure by one. 
+Confidence intervals are constructed using the classical asymptotic normal approximation, with
+heteroscedasticity adjustment provided by the `sandwich` package. 
 ```{r}
 Fbar = sum(G) / nrow(ca_pm25)
 true_sample_mte = beta0 + beta0_int * Fbar
@@ -103,7 +110,7 @@ true_sample_mte = beta0 + beta0_int * Fbar
 # Run linear glm, no interference
 fit_lm <- lm(Y1 ~ pm25 + pov + log(density), data = ca_pm25)
 mte = coef(fit_lm)["pm25"]
-mte_ci = coefci(fit_lm, vcov = vcovHC(fit_lm, "HC5"))["pm25", ]
+mte_ci = confint(fit_lm, vcov = vcovHC(fit_lm, "HC5"))["pm25", ]
 mte_ci = c(mte, mte_ci)
 mte_ci
 
@@ -125,7 +132,7 @@ mte_int_ci
 
 ```
 
-Create plot
+The code below plots our results and produces an image file. 
 
 ```{r}
 df_plot <- data.frame(
