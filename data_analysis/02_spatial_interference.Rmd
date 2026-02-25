@@ -29,7 +29,8 @@ Load interference graph from LEHD and process it into a data structure we can sa
 Since this takes a long time, we save the data to load later without needing to run this chunk.
 
 ```{r}
-od_raw <- vroom::vroom("data_analysis/data/ca_od_main_JT00_2016.csv.gz", show_col_types = FALSE)
+od_raw <- vroom::vroom("https://lehd.ces.census.gov/data/lodes/LODES7/ca/od/ca_od_main_JT00_2016.csv.gz", show_col_types = FALSE)
+
 ca_pm25_small <- ca_pm25 %>% select(GEOID, total_pop)
 # Clean the LEHD data into an interference matrix
 # that represents the proportion of the population commuting from each BG into every other BG

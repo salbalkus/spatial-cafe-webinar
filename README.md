@@ -1,4 +1,4 @@
-# Template for quarto slide decks
+# CAFE Webinar Code Repository
 
 *Title:* Addressing spatial confounding and interference in environmental health
 
