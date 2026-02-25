@@ -191,7 +191,7 @@ g3 <- ggplot() +
     legend.background = element_rect(fill = alpha("white", 0.6)),
     legend.position = "bottom"
   )
-png("figs/ca_bg_pm25_spatialplus.png", width = 12, height = 5, units = "in", res = 300)
+png("../figs/ca_bg_pm25_spatialplus.png", width = 12, height = 5, units = "in", res = 300)
 grid.arrange(g1, g2, g3, ncol = 3)
 dev.off()
 ```
@@ -224,7 +224,7 @@ results <- rbind.data.frame(
 # vertical line for true coef (beta0)
 # Order results by Oracle, then Orindary GLM, then spatial, then spatial plus
 results$method <- factor(results$method, levels = c("oracle", "unadjusted", "spatial", "spatial_plus"))
-png("figs/pm25_coefficients_comparison.png", width = 6, height = 4, units = "in", res = 350)
+png("../figs/pm25_coefficients_comparison.png", width = 6, height = 4, units = "in", res = 350)
 ggplot(results, aes(x = estimate, y = method)) +
   geom_point() +
   geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
@@ -359,7 +359,7 @@ lvl <- c("oracle", "unadjusted", "spatial", "spatial_plus",
 results <- results %>%
   mutate(method = factor(method, levels = lvl))
 
-png("figs/pm25_coefficients_comparison_all.png", width = 6, height = 4, units = "in", res = 350)
+png("../figs/pm25_coefficients_comparison_all.png", width = 6, height = 4, units = "in", res = 350)
 ggplot(results, aes(x = estimate, y = method)) +
   geom_point() +
   geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
