@@ -18,7 +18,7 @@ library(here)
 Next, load the data. For this tutorial, we will use Longitudinal Employer-Household Dynamics data 
 to represent the network denoting interference between units.
 ```{r}
-ca_pm25 <- read.csv("data_analysis/data/ca_bg_pm25_census_2016.csv")
+ca_pm25 <- read.csv("data/ca_bg_pm25_census_2016.csv")
 ca_pm25$GEOID <- str_pad(as.character(ca_pm25$GEOID), width = 12, pad = "0")
 
 # Work with a clean dataset
