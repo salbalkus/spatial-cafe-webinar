@@ -22,7 +22,7 @@ library(scales)
 
 1) Ensure that you have a folder in this directory called "data"; if not, create it. 
 2) Download the dataset from CAFE Dataverse (https://doi.org/10.7910/DVN/TN9JTT) as a csv and place it in the "data" folder. The file should be named "ca_bg_pm25_census_2016.csv".
-3) Ensure that you have a folder in this directory called "figs"; if not, create it. This is where the output figures will be saved.
+3) Ensure that you have a folder in the parent directory spatial-cafe-webinar called "figs"; if not, create it. This is where the output figures will be saved.
 
 ## Import census block group shapefile, California 2016, for plotting
 ```{r importshapefile}
