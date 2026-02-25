@@ -1,9 +1,11 @@
 ---
 title: "Spatial confounding example"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
-```{r}
+```{r, warning=FALSE, message=FALSE}
 # Load necessary packages
 library(sf)
 library(mgcv)
@@ -25,7 +27,7 @@ library(scales)
 3) Ensure that you have a folder in the parent directory spatial-cafe-webinar called "figs"; if not, create it. This is where the output figures will be saved.
 
 ## Import census block group shapefile, California 2016, for plotting
-```{r importshapefile}
+```{r importshapefile, cache=T}
 url <- "https://www2.census.gov/geo/tiger/TIGER2016/BG/tl_2016_06_bg.zip"
 temp <- tempfile()
 download.file(url, temp)
@@ -35,14 +37,14 @@ unlink(temp)
 ```
 
 ## Read in dataset
-```{r readdata}
+```{r readdata, cache=T}
 ca_pm25 <- read.csv('data/ca_bg_pm25_census_2016.csv')
 # Convert GEOID to character using padding
 ca_pm25$GEOID <- str_pad(ca_pm25$GEOID, width = 12, pad = "0")
 ```
 
 ## Generate synthetic outcome
-```{r syntheticoutcome}
+```{r syntheticoutcome, cache=T}
 set.seed(1234)
 
 beta0 <- 0.05
@@ -63,7 +65,7 @@ summary(ca_pm25$Y)
 ```
 
 ## Fit an oracle method (which adjusts for the unmeasured spatial confounders)
-```{r oracle}
+```{r oracle, cache=T}
 # Run glm poisson
 fit_glm <- glm(Y ~ pm25 + pov + log(density) + ndvi + D_min_km,
                offset = log(total_pop),
@@ -79,7 +81,7 @@ results <- data.frame(
 ```
 
 ## Fit spatial method 
-```{r spatial}
+```{r spatial, cache=T}
 fit_spatial <- gam(
   Y ~ pm25 + # exposure
     pov + log(density) + # covariates
@@ -105,7 +107,7 @@ results <- rbind.data.frame(
 ```
 
 ## Spatial plus Step 1
-```{r spatialplus1}
+```{r spatialplus1, cache=T}
 f_X_hat <- gam(pm25 ~ s(cent_x, # x coordinate of block group centroid
                         cent_y, # y coordinate of block group centroid
                         k = 75, # basis dimension
@@ -118,7 +120,7 @@ summary(f_X_hat)
 ```
 
 ## Spatial plus Step 2
-```{r spatialplus2}
+```{r spatialplus2, cache=T}
 # Depending on the degrees of freedom k, this can take a long time to run
 fit_spatial_plus <- mgcv::gam(
   Y ~ residuals_pm25 + # residuals of PM 2.5 from the previous regression
@@ -132,12 +134,12 @@ fit_spatial_plus <- mgcv::gam(
 ```
 
 ## Report results
-```{r spatialplusreport}
+```{r spatialplusreport, cache=T}
 print(paste("Estimate:", summary(fit_spatial_plus)$p.coeff["residuals_pm25"]))
 ```
 
 ## Save results
-```{r spatialplussave}
+```{r spatialplussave, cache=T}
 summary(fit_spatial_plus)
 # Save coefficient of residuals_pm25 and confidence interval in a data frame
 results <- rbind.data.frame(
@@ -152,7 +154,7 @@ results <- rbind.data.frame(
 ```
 
 ## Plot PM2.5, the fitted values, and residuals
-```{r plotspatialplus}
+```{r plotspatialplus, cache=T}
 ca_bg_shp <- ca_bg_shp %>%
   left_join(st_drop_geometry(ca_pm25) %>% dplyr::select(GEOID, pm25, smoothed_pm25, residuals_pm25), by = "GEOID")
 g1 <- ggplot() +
@@ -191,13 +193,16 @@ g3 <- ggplot() +
     legend.background = element_rect(fill = alpha("white", 0.6)),
     legend.position = "bottom"
   )
+# Plot inline
+grid.arrange(g1, g2, g3, ncol = 3)
+# Save
 png("../figs/ca_bg_pm25_spatialplus.png", width = 12, height = 5, units = "in", res = 300)
 grid.arrange(g1, g2, g3, ncol = 3)
 dev.off()
 ```
 
 ## Unadjusted GLM
-```{r unadjustedglm}
+```{r unadjustedglm, cache=T}
 # Compare to unadjusted glm
 fit_ols <- glm(Y ~ pm25 + pov + log(density),
                offset = log(total_pop),
@@ -207,7 +212,7 @@ summary(fit_ols)
 ```
 
 ## Save unadjusted GLM results
-```{r unadjustedglmsave}
+```{r unadjustedglmsave, cache=T}
 results <- rbind.data.frame(
   results,
   data.frame(
@@ -220,12 +225,11 @@ results <- rbind.data.frame(
 ```
 
 ## Plot the results
-```{r plotresults}
+```{r plotresults, cache=T}
 # vertical line for true coef (beta0)
 # Order results by Oracle, then Orindary GLM, then spatial, then spatial plus
 results$method <- factor(results$method, levels = c("oracle", "unadjusted", "spatial", "spatial_plus"))
-png("../figs/pm25_coefficients_comparison.png", width = 6, height = 4, units = "in", res = 350)
-ggplot(results, aes(x = estimate, y = method)) +
+p <- ggplot(results, aes(x = estimate, y = method)) +
   geom_point() +
   geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
   geom_vline(xintercept = beta0, linetype = "dashed", color = "red") +
@@ -236,12 +240,17 @@ ggplot(results, aes(x = estimate, y = method)) +
   xlab("") +
   ylab("") +
   theme_minimal()
+# Plot inline
+print(p)
+# Save
+png("../figs/pm25_coefficients_comparison.png", width = 6, height = 4, units = "in", res = 350)
+p
 dev.off()
 
 ```
 
 ## Fit a model with fixed effects at the county level
-```{r countyfe}
+```{r countyfe, cache=T}
 # Extract county FIPS code from GEOID (first 5 digits)
 ca_pm25$county_fips <- substr(ca_pm25$GEOID, 1, 5)
 # Convert to factor
@@ -262,7 +271,7 @@ results <- rbind.data.frame(
 ```
 
 ## Fit a model with random effects at the county level
-```{r countyre}
+```{r countyre, cache=T}
 fit_re <- glmer(Y ~ pm25 + pov + log(density) + (1|county_fips),
                 offset = log(total_pop),
                 family = "poisson",
@@ -279,7 +288,7 @@ results <- rbind.data.frame(
 ```
 
 ## Fit a model with random effects at the tract level
-```{r tractre}
+```{r tractre, cache=T}
 # Extract tract FIPS code from GEOID (first 11 digits)
 ca_pm25$tract_fips <- substr(ca_pm25$GEOID, 1, 11)
 # Convert to factor
@@ -350,7 +359,7 @@ results <- rbind.data.frame(
 ```
 
 ## Plot all results on a single plot
-```{r plotallresults}
+```{r plotallresults, cache=T}
 # Order results by Oracle, then Orindary GLM, then spatial, then spatial plus, then county fe, county re, tract re, CAR
 lvl <- c("oracle", "unadjusted", "spatial", "spatial_plus",
          "county_fixed_effects", "county_random_effects",
@@ -359,14 +368,18 @@ lvl <- c("oracle", "unadjusted", "spatial", "spatial_plus",
 results <- results %>%
   mutate(method = factor(method, levels = lvl))
 
-png("../figs/pm25_coefficients_comparison_all.png", width = 6, height = 4, units = "in", res = 350)
-ggplot(results, aes(x = estimate, y = method)) +
+p <- ggplot(results, aes(x = estimate, y = method)) +
   geom_point() +
   geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
   geom_vline(xintercept = beta0, linetype = "dashed", color = "red") +
   scale_y_discrete(limits = rev(lvl)) +   # <- puts oracle on top, BYM2 on bottom
   theme_minimal() +
   xlab("") + ylab("")
+# Plot inline
+print(p)
+# Save
+png("../figs/pm25_coefficients_comparison_all.png", width = 6, height = 4, units = "in", res = 350)
+p
 dev.off()
 
 ```
