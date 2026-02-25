@@ -62,8 +62,7 @@ od_bg <- od_raw %>% mutate(w_geocode = substr(w_geocode, 1, 12),
 od_bg[is.na(od_bg$weight), "weight"] <- 0
 od_bg[is.na(od_bg$w_geocode), "w_geocode"] <- od_bg[is.na(od_bg$w_geocode), "h_geocode"]
 
-
-write.csv(od_bg, "data_analysis/data/ca_od_bg.csv", row.names = F)
+write.csv(od_bg, "data/ca_od_bg.csv", row.names = F)
 ```
 
 Next, we turn the edgelist into an adjacency matrix, and generate some sample data
@@ -71,7 +70,7 @@ to demonstrate the method. Notice how we construct "interference terms" by multi
 the interference adjacency matrix by each column (including the intercept column of ones).
 ```{r}
 # Turn interference edgelist into adjacency matrix
-od_bg <- read.csv("data_analysis/data/ca_od_bg.csv")
+od_bg <- read.csv("data/ca_od_bg.csv")
 od_graph = graph_from_data_frame(od_bg, directed=T)
 G = as_adjacency_matrix(od_graph, attr = "weight")
 diag(G) = 0
